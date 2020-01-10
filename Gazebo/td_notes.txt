@@ -1,0 +1,139 @@
+
+********************************************************************************************
+	_______________________________________________________________________________	
+	|									      |
+	|~~~~~ Install ROS + Gazebo + PX4 firmware using just a single file from ~~~~~|
+	|_____________________________________________________________________________|
+
+https://dev.px4.io/en/setup/dev_env_linux.html
+                      -or-
+https://raw.githubusercontent.com/PX4/Devguide/master/build_scripts/ubuntu_sim_ros_gazebo.sh
+
+Run this file to auto download and install everything at once
+
+********************************************************************************************
+	____________________________________________________________________
+	|								   |
+	|~~~~~ Publishing on setpoint_attitude topic in the new MAVROS ~~~~~|
+	|__________________________________________________________________|
+
+1. Change the "use_quaternion" flag to "true" in the /mavros/launch/px4_config.yaml file 
+	- This enables the use of attitude angles and publishes as quaternions
+
+2. The new topics are:
+		/mavros/setpoint_attitude/target_attitude : Attitude topic [in quaternions]
+		/mavros/setpoint_attitude/thrust	  : Thrust topic   [in range 0 - 1]
+
+********************************************************************************************
+	______________________________________________________________________
+	|								                                      |
+	|~~~~~ Making Gazebo motor_model plug-in subscribe to ROS topics ~~~~~|
+	|_____________________________________________________________________|
+
+1. Add the following lines to the src/Firmware/Tools/sitl_gazebo/src/gazebo_motor_model.cpp:
+
+	// ROS Topic subscriber
+  	// Initialize ros, if it has not already bee initialized.
+  	if (!ros::isInitialized())  {
+      /*{
+            ROS_FATAL_STREAM("A ROS node for Gazebo has not been initialized, unable to load plug-in. "
+        	<< "Load the Gazebo system plug-in 'libgazebo_ros_api_plugin.so' in the gazebo_ros package)");
+      	return;
+      	}
+
+    	ROS_INFO("Hello World!");*/
+
+    	int argc = 0;
+    	char **argv = NULL;
+    	ros::init(argc, argv, "gazebo_client", ros::init_options::NoSigintHandler);
+    	gzwarn << "[gazebo_motor_model]: Subscribe to /gazebo/motor_failure/flag \n" ;
+  	}
+
+  	// Create our ROS node. This acts in a similar manner to the Gazebo node
+  	this->rosNode.reset(new ros::NodeHandle("gazebo_client"));
+
+  	// Create a named topic, and subscribe to it.
+  	ros::SubscribeOptions so1 = ros::SubscribeOptions::create<std_msgs::Int8>("/motor_failure/motor_number", 1, boost::bind(&GazeboMotorModel::motorFailNumCallBack, this, _1), ros::VoidPtr(), &this->rosQueue);
+  	this->rosSub = this->rosNode->subscribe(so1);
+  
+  	this->rosQueueThread = std::thread(std::bind(&GazeboMotorModel::QueueThread, this));
+
+  	// Listen to the update event. This event is broadcast every
+  	// simulation iteration.
+	updateConnection_ = event::Events::ConnectWorldUpdateBegin(boost::bind(&GazeboMotorModel::OnUpdate, this, _1));
+
+2.	Call "UpdateMotorFail" in the OnUpdate function:
+	void GazeboMotorModel::UpdateMotorFail() {
+	  if (motor_number_ == motor_Failure_Number_ - 1){
+	    motor_constant_ = 0.0;
+	    //joint_->SetVelocity(0,0);
+	    if (screen_msg_flag){
+	      std::cout << "Motor number [" << motor_Failure_Number_ <<"] failed! [Motor constant = " << motor_constant_ << "]" << std::endl;
+	      //std::cout << "Motor number [" << motor_Failure_Number_ <<"] failed!  [Motor thrust = 0]"<< std::endl;
+	      tmp_motor_num = motor_Failure_Number_;
+	      
+	      screen_msg_flag = 0;
+	    }
+	  }else if (motor_Failure_Number_ == 0 && motor_number_ ==  tmp_motor_num - 1){
+	     if (!screen_msg_flag){
+	       motor_constant_ = kDefaultMotorConstant;
+	       std::cout << "Motor number [" << tmp_motor_num <<"] running! [Motor constant = " << motor_constant_ << " (default)]" << std::endl;
+	       //std::cout << "Motor number [" << tmp_motor_num <<"] running! [Motor thrust = (default)]" << std::endl;
+	       screen_msg_flag = 1;
+	     }
+	  }else{
+	     motor_constant_ = kDefaultMotorConstant;
+	  }
+	}
+
+2. Add the following to the src/Firmware/Tools/sitl_gazebo/include/gazebo_motor_model.h:
+
+	// ROS Topic subscriber
+	#include <thread>
+	#include "ros/ros.h"
+	#include "ros/callback_queue.h"
+	#include "ros/subscribe_options.h"
+	#include "std_msgs/Bool.h"
+
+	public:
+  	bool motor_Failure_Flag_;
+
+  	void motorFailureCallBack(const std_msgs::BoolConstPtr& _msg)
+  	{
+    	this->motor_Failure_Flag_ = _msg->data;
+  	}
+
+  	int motor_Failure_Number_;
+
+  	void motorFailNumCallBack(const std_msgs::Int8ConstPtr& _msg1)
+  	{
+    	motor_Failure_Number_ = _msg1->data;
+  	}
+
+ 	private:
+	void QueueThread()
+  	{
+    	static const double timeout = 0.01;
+    	while (this->rosNode->ok())
+    	{
+      	this->rosQueue.callAvailable(ros::WallDuration(timeout));
+    	}
+  	}
+
+  	std::unique_ptr<ros::NodeHandle> rosNode;
+  	ros::Subscriber rosSub;
+  	ros::CallbackQueue rosQueue;
+  	std::thread rosQueueThread;
+
+3. Add these lines to the src/Firmware/Tools/sitl_gazebo/CMakeLists.txt:
+
+	# for ROS subscriber
+	find_package(roscpp REQUIRED)
+	find_package(std_msgs REQUIRED)
+	include_directories(${roscpp_INCLUDE_DIRS})
+	include_directories(${std_msgs_INCLUDE_DIRS})
+
+   	catkin_package(  DEPENDS roscpp)
+	target_link_libraries(rotors_gazebo_motor_model ${GAZEBO_libraries} ${roscpp_LIBRARIES})
+
+
